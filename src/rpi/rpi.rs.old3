@@ -1,0 +1,190 @@
+use rppal::gpio::{Gpio, Level, InputPin};
+use chrono::{DateTime, Local, Duration};
+use std::process::Command;
+use std::fmt;
+
+pub fn wait_for_motion() {
+    let pi_gpio = Gpio::new().unwrap();
+
+    const MOTION_PIN: u8 = 17;
+    const MOTION_TIME: i64 = 500;
+    const BUTTON_PIN: u8 = 10;
+    const BUTTON_TIME: i64 = 1000;
+
+    let mut screen_status: DPMSMode = DPMSMode::On;
+    let mut screen_time: DateTime<Local> = Local::now();
+    let screen_off_time: Duration = Duration::milliseconds(180000);
+
+    let mut motion_events: PinEvent = match PinEvent::new(&pi_gpio, 17, 500, motion_trip) {
+        Ok(x) => x,
+        Err(error) => {
+            println!("{:?}", error.message);
+            match PinEvent::new(&pi_gpio, MOTION_PIN, MOTION_TIME, motion_trip) {
+                Ok(x) => x,
+                Err(error) => {panic!("{:?}", error.message);}
+            }
+        }
+    };
+    let mut button_events: PinEvent = match PinEvent::new(&pi_gpio, 10, 75, button_trip) {
+        Ok(x) => x,
+        Err(error) => {
+            println!("{:?}", error.message);
+            match PinEvent::new(&pi_gpio, BUTTON_PIN, BUTTON_TIME, button_trip) {
+                Ok(x) => x,
+                Err(error) => {panic!("{:?}", error.message);}
+            }
+        }
+    };
+
+    loop {
+        screen_status = match motion_events.check_trip(&mut screen_status) {
+            Ok(x) => x,
+            Err(error) => {
+                println!("Motion sensor error: {:?}", error.message);
+                screen_status
+            }
+        };
+        screen_status = match button_events.check_trip(&mut screen_status) {
+            Ok(x) => x,
+            Err(error) => {
+                println!("button error: {:?}", error.message);
+                screen_status
+            }
+        };
+
+        if !motion_events.tripped && !button_events.tripped && Local::now().signed_duration_since(screen_time) >= screen_off_time && screen_status == DPMSMode::On {
+            if let Err(error) = change_screen_mode(DPMSMode::Off) {
+                panic!("{:?}", error.message);
+            };
+            screen_status = DPMSMode::Off;
+            //println!("Timeout: Turn Off; Mode: {}", mode);
+        } else if (motion_events.tripped || button_events.tripped) && screen_status == DPMSMode::On {
+            screen_time = Local::now();
+        }
+    };
+}
+
+fn change_screen_mode(mode: DPMSMode) -> Result<(), RPIError> {
+    let mode = match mode {
+        DPMSMode::On => "on",
+        DPMSMode::Off => "off"
+    };
+
+    let mut bash_shell = Command::new("bash");
+    //bash_shell.arg("-c").arg("export").arg("DISPLAY=:0").spawn().unwrap();
+    match bash_shell.arg("-c").arg("xset").arg("-display :0").arg("dpms").arg("force").arg(mode).output() {    
+        Ok(mut x) => {
+//                      x.kill().unwrap();
+                      Ok(())
+                     },
+        Err(screen_error) => {Err(RPIError::new(format!("Can't turn {} screen: {:?}", mode, screen_error)))}
+    }
+}
+
+fn motion_trip(_mode: &DPMSMode) -> Result<DPMSMode, RPIError> {
+    let _ = change_screen_mode(DPMSMode::On)?;
+    Ok(DPMSMode::On)
+}
+
+fn button_trip(current_mode: &DPMSMode) -> Result<DPMSMode, RPIError> {
+    match current_mode {
+        DPMSMode::Off => {
+            println!("Button pressed: Turn On");
+            change_screen_mode(DPMSMode::On)?;
+            Ok(DPMSMode::On)
+        },
+        DPMSMode::On => {
+            println!("Button pressed: Turn Off");
+            let _ = change_screen_mode(DPMSMode::Off)?;
+            Ok(DPMSMode::Off)
+        }
+    }
+}
+
+#[derive(PartialEq, Copy, Clone)]
+enum DPMSMode {
+    On,
+    Off
+}
+
+struct PinEvent {
+    time_start: DateTime<Local>,
+    time_delay: Duration,
+    deadband_start: DateTime<Local>,
+    deadband_delay: Duration,
+    tripped: bool,
+    pin: InputPin,
+    trip_action: fn(&DPMSMode) -> Result<DPMSMode, RPIError>
+}
+
+impl PinEvent {
+    fn new (gpio: &Gpio, pin_num: u8, time_delay: i64, trip_action: fn(&DPMSMode) -> Result<DPMSMode, RPIError>) -> Result<PinEvent, RPIError> {
+        let gpio_pin: InputPin = match gpio.get(pin_num) {
+            Ok(x) => x.into_input(),
+            Err(gpio_error) => {return Err(RPIError::new(format!("Wakeup Error On pin {}: {:?}", pin_num, gpio_error)));}
+        };
+
+        let new_pin = PinEvent {
+            time_start: DateTime::<Local>::default(),
+            time_delay: Duration::milliseconds(time_delay),
+            deadband_start: DateTime::<Local>::default(),
+            deadband_delay: Duration::milliseconds(100),
+            tripped: false,
+            trip_action: trip_action,
+            pin: gpio_pin
+        };
+
+        Ok(new_pin)
+    }
+
+    fn check_trip (&mut self, current_mode: &DPMSMode) -> Result<DPMSMode, RPIError> {
+        let unstarted_timer = DateTime::<Local>::default();
+ 
+        match self.pin.read() {
+            Level::High if self.tripped => (),
+            Level::High => {
+                if self.time_start != unstarted_timer && (Local::now().signed_duration_since(self.time_start) >= self.time_delay) {
+//                    dbg!(Local::now().signed_duration_since(self.time_start));
+//                    dbg!(self.time_delay);
+                    let mode = (self.trip_action)(current_mode)?;
+                    self.tripped = true;
+//                    println!("Time between: {:?} ms", Local::now().signed_duration_since(self.time_start).num_milliseconds());
+                    return Ok(mode);
+
+                } else if self.time_start == unstarted_timer {
+                    self.time_start = Local::now();
+                }
+            },
+            Level::Low if self.tripped && (Local::now().signed_duration_since(self.deadband_start) >= self.deadband_delay) => {
+                self.time_start = unstarted_timer;
+                self.tripped = false;
+                self.deadband_start = unstarted_timer;
+
+            },
+            Level::Low if self.tripped => {
+                self.deadband_start = Local::now();
+            },
+            Level::Low => ()
+        }
+        
+        Ok(*current_mode)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RPIError{
+    message: String
+}
+
+impl fmt::Display for RPIError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self.message)
+    }
+}
+
+impl RPIError {
+    fn new(message: String) -> RPIError {
+        RPIError {message: message}
+    }
+}
+

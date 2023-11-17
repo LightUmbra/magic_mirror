@@ -1,0 +1,105 @@
+use rppal::gpio::{Gpio, Level, InputPin};
+use chrono::{DateTime, Local, Duration};
+//use x11rb::protocol::dpms::{DPMSMode, force_level};
+//use x11rb::rust_connection::RustConnection;
+use enigo::{Enigo, Key, KeyboardControllable};
+
+struct PinEvent {
+    time_start: DateTime<Local>,
+    time_delay: Duration,
+    tripped: bool,
+    pin: InputPin,
+    //trip_action: for<'a> fn(&'a RustConnection, DPMSMode) -> DPMSMode
+}
+
+impl PinEvent {
+    fn new (gpio: &Gpio, pin_num: u8, time_delay: i64) -> PinEvent { //trip_action: for<'a> fn(&'a RustConnection, DPMSMode) -> DPMSMode
+        PinEvent {
+            time_start: DateTime::<Local>::default(),
+            time_delay: Duration::milliseconds(time_delay),
+            tripped: false,
+            trip_action: trip_action,
+            pin: match gpio.get(pin_num) {
+                Ok(x) => x.into_input(),
+                Err(gpio_error) => {panic!("Wakeup Error on pin {}: {:?}", pin_num, gpio_error);}
+            }
+        }
+    }
+
+    fn check_trip (&mut self) {
+        let unstarted_timer = DateTime::<Local>::default();
+
+        match self.pin.read() {
+            Level::High if self.tripped => (),
+            Level::High => {
+                if self.time_start != unstarted_timer && (Local::now().signed_duration_since(self.time_start) >= self.time_delay) {
+                    
+                    //let mode = (self.trip_action)(connection, current_mode);
+                    toggle_screen();
+                    self.tripped = true;
+                    return mode;
+
+                } else if self.time_start == unstarted_timer {
+                    self.time_start = Local::now();
+                }
+            },
+            Level::Low if self.tripped => {
+                self.time_start = unstarted_timer;
+                self.tripped = false;
+            },
+            Level::Low => ()
+        }
+        return current_mode;
+    }
+}
+
+pub fn wait_for_motion() {
+    /*let (x_connection, _) = match RustConnection::connect(None){
+        Ok(x) => x,
+        Err(conn_err) => {panic!("Can't connect to X: {:?}", conn_err);}
+    };*/
+
+    let pi_gpio = Gpio::new().unwrap();
+
+    //let mut screen_status: DPMSMode = DPMSMode::ON;
+    let mut screen_time: DateTime<Local> = Local::now();
+    let screen_off_time: Duration = Duration::milliseconds(180000);
+
+    let mut motion_events: PinEvent = PinEvent::new(&pi_gpio, 17, 500, motion_trip);
+    let mut button_events: PinEvent = PinEvent::new(&pi_gpio, 10, 75, button_trip);
+
+    loop {
+        motion_events.check_trip(&x_connection, screen_status);
+        button_events.check_trip(&x_connection, screen_status);
+
+        /*if !motion_events.tripped && !button_events.tripped && Local::now().signed_duration_since(screen_time) >= screen_off_time && screen_status == DPMSMode::ON {
+            toggle_screen(&x_connection, DPMSMode::OFF);
+        } else if (motion_events.tripped || button_events.tripped) && screen_status == DPMSMode::ON {
+            screen_time = Local::now();
+        }*/
+    };
+}
+
+fn toggle_screen() { //connection: &RustConnection, mode: DPMSMode
+    /*let _ = match force_level(connection, mode) {
+        Ok(x) => x,
+        Err(screen_error) => {panic!("Can't turn on/off screen: {:?}", screen_error);}
+    };*/
+    let mut enigo_key = Enigo::new();
+    enigo_key.key_click(Key::Pause);
+}
+
+/*fn motion_trip(connection: &RustConnection, _mode: DPMSMode) -> DPMSMode {
+    toggle_screen(&connection, DPMSMode::ON);
+    DPMSMode::ON
+}
+
+fn button_trip(connection: &RustConnection, current_mode: DPMSMode) -> DPMSMode {
+    if current_mode != DPMSMode::ON {
+        toggle_screen(&connection, DPMSMode::ON);
+        DPMSMode::ON
+    } else {
+        toggle_screen(&connection, DPMSMode::OFF);
+        DPMSMode::OFF
+    }
+}*/

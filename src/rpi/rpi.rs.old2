@@ -1,0 +1,106 @@
+use rppal::gpio::{Gpio, Level, InputPin};
+use chrono::{DateTime, Local, Duration};
+use std::process::Command;
+
+pub fn wait_for_motion() {
+    let pi_gpio = Gpio::new().unwrap();
+
+    let mut screen_status: DPMSMode = DPMSMode::ON;
+    let mut screen_time: DateTime<Local> = Local::now();
+    let screen_off_time: Duration = Duration::milliseconds(180000);
+
+    let mut motion_events: PinEvent = PinEvent::new(&pi_gpio, 17, 500, motion_trip);
+    let mut button_events: PinEvent = PinEvent::new(&pi_gpio, 10, 75, button_trip);
+
+    loop {
+        screen_status = motion_events.check_trip(screen_status);
+        screen_status = button_events.check_trip(screen_status);
+
+        if !motion_events.tripped && !button_events.tripped && Local::now().signed_duration_since(screen_time) >= screen_off_time && screen_status == DPMSMode::ON {
+            change_screen_mode(DPMSMode::OFF)
+        } else if (motion_events.tripped || button_events.tripped) && screen_status == DPMSMode::ON {
+            screen_time = Local::now();
+        }
+    };
+}
+
+fn change_screen_mode(mode: DPMSMode){
+    let mode = match mode {
+        DPMSMode::ON => "on",
+        DPMSMode::OFF => "off"
+    };
+    
+    match Command::new("xset").arg("dpms").arg("force").arg(mode).spawn() {
+        Ok(_) => (),
+        Err(screen_error) => {println!("Can't turn {} screen: {:?}", mode, screen_error);}
+    }
+}
+
+fn motion_trip(_mode: DPMSMode) -> DPMSMode {
+    change_screen_mode(DPMSMode::ON);
+    DPMSMode::ON
+}
+
+fn button_trip(current_mode: DPMSMode) -> DPMSMode {
+    if current_mode != DPMSMode::ON {
+        change_screen_mode(DPMSMode::ON);
+        DPMSMode::ON
+    } else {
+        change_screen_mode(DPMSMode::OFF);
+        DPMSMode::OFF
+    }
+}
+
+#[derive(PartialEq)]
+enum DPMSMode {
+    ON,
+    OFF
+}
+
+struct PinEvent {
+    time_start: DateTime<Local>,
+    time_delay: Duration,
+    tripped: bool,
+    pin: InputPin,
+    trip_action: fn(DPMSMode) -> DPMSMode
+}
+
+impl PinEvent {
+    fn new (gpio: &Gpio, pin_num: u8, time_delay: i64, trip_action: fn(DPMSMode) -> DPMSMode) -> PinEvent {
+        PinEvent {
+            time_start: DateTime::<Local>::default(),
+            time_delay: Duration::milliseconds(time_delay),
+            tripped: false,
+            trip_action: trip_action,
+            pin: match gpio.get(pin_num) {
+                Ok(x) => x.into_input(),
+                Err(gpio_error) => {panic!("Wakeup Error on pin {}: {:?}", pin_num, gpio_error);}
+            }
+        }
+    }
+
+    fn check_trip (&mut self, current_mode: DPMSMode) -> DPMSMode {
+        let unstarted_timer = DateTime::<Local>::default();
+
+        match self.pin.read() {
+            Level::High if self.tripped => (),
+            Level::High => {
+                if self.time_start != unstarted_timer && (Local::now().signed_duration_since(self.time_start) >= self.time_delay) {
+                    
+                    let mode = (self.trip_action)(current_mode);
+                    self.tripped = true;
+                    return mode;
+
+                } else if self.time_start == unstarted_timer {
+                    self.time_start = Local::now();
+                }
+            },
+            Level::Low if self.tripped => {
+                self.time_start = unstarted_timer;
+                self.tripped = false;
+            },
+            Level::Low => ()
+        }
+        return current_mode;
+    }
+}
